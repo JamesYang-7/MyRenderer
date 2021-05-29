@@ -21,14 +21,7 @@ public:
     Diffuse(const Color& a) : albedo(new SolidColor(a)) {}
     Diffuse(Texture* a) : albedo(a){}
 
-    virtual bool scatter(const Ray& r_in, const HitRecord& hrec, ScatterRecord& srec) const override {
-        srec.is_specular = false;
-        srec.p_pdf = new CosinePDF(hrec.normal);
-        Vec3 scatter_direction = srec.p_pdf->generate();
-        srec.scattered = Ray(hrec.p, scatter_direction);
-        srec.albedo = albedo->value(hrec.u, hrec.v, hrec.p);
-        return true;
-    }
+    virtual bool scatter(const Ray& r_in, const HitRecord& hrec, ScatterRecord& srec) const override;
 
     virtual double scattering_pdf(const Ray& ray_in, const HitRecord& hrec, const Ray& scattered) const {
         double cosine = dot(hrec.normal, scattered.direction());
@@ -80,22 +73,7 @@ public:
 class Dielectric : public Material {
 public:
     Dielectric(Texture* a, double idx_rfr) : albedo(a), index_of_refr(idx_rfr) {};
-    virtual bool scatter(const Ray& r_in, const HitRecord& hrec, ScatterRecord& srec) const override {
-        srec.is_specular = true;
-        double refr_ratio = hrec.front_face ? (1.0 / index_of_refr) : index_of_refr;
-        double cos_theta = fmin(dot(-r_in.direction(), hrec.normal), 1.0);
-        double sin_theta = sqrt(1.0 - cos_theta * cos_theta);
-        Vec3 scatter_direction;
-        if (refr_ratio * sin_theta >= 1 || reflectance(cos_theta, refr_ratio) > random_double()) { // if total internal reflection or
-            scatter_direction = reflect(r_in.direction(), hrec.normal);
-        }
-        else {
-            scatter_direction = refract(r_in.direction(), hrec.normal, refr_ratio);
-        }
-        srec.scattered = Ray(hrec.p, scatter_direction);
-        srec.albedo = albedo->value(hrec.u, hrec.v, hrec.p);
-        return true;
-    }
+    virtual bool scatter(const Ray& r_in, const HitRecord& hrec, ScatterRecord& srec) const override;
 
 public:
     double index_of_refr;

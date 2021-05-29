@@ -1,6 +1,6 @@
 #include "rtweekend.h"
 
-const double sin_table[360] = {
+/*const double sin_table[360] = {
 	0.00000000, 0.01745241, 0.03489950, 0.05233596, 0.06975647, 0.08715574, 0.10452846, 0.12186934,
 0.13917310, 0.15643447, 0.17364818, 0.19080900, 0.20791169, 0.22495105, 0.24192190, 0.25881905,
 0.27563736, 0.29237170, 0.30901699, 0.32556815, 0.34202014, 0.35836795, 0.37460659, 0.39073113,
@@ -94,7 +94,10 @@ const double cos_table[360] = {
 0.91354546, 0.92050485, 0.92718385, 0.93358043, 0.93969262, 0.94551858, 0.95105652, 0.95630476,
 0.96126170, 0.96592583, 0.97029573, 0.97437006, 0.97814760, 0.98162718, 0.98480775, 0.98768834,
 0.99026807, 0.99254615, 0.99452190, 0.99619470, 0.99756405, 0.99862953, 0.99939083, 0.99984770
-};
+};*/
+
+const double infinity = std::numeric_limits<double>::infinity();
+const double PI = 3.141592653589793;
 
 std::random_device seed;
 std::default_random_engine generator(seed());
@@ -110,12 +113,12 @@ double random_double() {
 	return distribution(generator);
 }
 
-double random_double(double min, double max) {
+double random_double(double min, double max) { // range is [min, max)
 	return min + random_double() * (max - min);
 }
 
-int random_int(int min, int max) { // including max
-	return static_cast<int>(random_double(min, max + 1));
+int random_int(int min, int max) { // including min and max
+	return static_cast<int>(random_double(min, max + 1.0));
 }
 
 Vec3 random_in_unit_disk() {

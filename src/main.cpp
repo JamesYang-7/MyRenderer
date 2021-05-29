@@ -5,6 +5,7 @@
 #include <cmath>
 #include <random>
 #include <ctime>
+#include <string>
 #include "rtweekend.h"
 #include "color.h"
 #include "hittable_list.h"
@@ -14,25 +15,25 @@
 #include "aarect.h"
 #include "box.h"
 #include "pdf.h"
-#include "photon_map.h"
 #include "bvh.h"
+#include "photon_map.h"
 
 using namespace std;
-int max_photons = 0;
+
 enum class ParamConfig {DEFALUT = 1, CUSTOM};
-enum class RenderingMethodConfig {PATH_TRACING = 1, PHOTON_MAPPING};
+enum class RenderingMethod {PATH_TRACING = 1, PHOTON_MAPPING};
 string filename = "default.ppm";
 
 Color path_tracing_radiance(const Ray& r, const Color& background, const Hittable& world, Hittable* lights, double imp_ratio, int depth) {
+    Color color = Color(0, 0, 0);
     if (depth < 0) {
-        return Vec3();
+        return Color();
     }
     HitRecord hrec;
     if (!world.hit(r, 1e-4, infinity, hrec)) { // if not hit
         return background;
     }
     ScatterRecord srec;
-    double pdf_val = 0;
     Color emitted = hrec.mat_ptr->emitted(r, hrec, hrec.u, hrec.v, hrec.p);
 
     if (!hrec.mat_ptr->scatter(r, hrec, srec)) {
@@ -42,29 +43,63 @@ Color path_tracing_radiance(const Ray& r, const Color& background, const Hittabl
         return emitted + srec.albedo * path_tracing_radiance(srec.scattered, background, world, lights, imp_ratio, depth - 1);
     }
     else {
-        MixturePDF* mix_pdf = new MixturePDF(new HittableCustomPDF(lights, hrec.p), srec.p_pdf, imp_ratio);
+        PDF* pdf_imp = new HittableCustomPDF(lights, hrec.p);
+        MixturePDF* mix_pdf = new MixturePDF(pdf_imp, srec.p_pdf, imp_ratio);
         srec.scattered = Ray(hrec.p, mix_pdf->generate());
-        pdf_val = mix_pdf->value(srec.scattered.direction());
-        delete mix_pdf;
-        return emitted + srec.albedo * path_tracing_radiance(srec.scattered, background, world, lights, imp_ratio, depth - 1)
+        double pdf_val = mix_pdf->value(srec.scattered.direction());
+        color = emitted + srec.albedo * path_tracing_radiance(srec.scattered, background, world, lights, imp_ratio, depth - 1)
             * hrec.mat_ptr->scattering_pdf(r, hrec, srec.scattered) / pdf_val;
+
+        delete mix_pdf; // must release memory
+        delete pdf_imp;
+
+        return color;
         // For lambertian surface, BRDF = albedo/PI. Value of 'albedo * scattering_pdf' here is equal to
         // the 'BRDF * cos(omega)' part in the rendering equation
+    }
+    return color;
+}
+
+Color direct_lighting_radiance(const Ray& r, const Color& background, const Hittable& world, Hittable* lights, int depth) {
+    if (depth < 0) {
+        return Color();
+    }
+    HitRecord hrec;
+    if (!world.hit(r, 1e-4, infinity, hrec)) { // if not hit
+        return background;
+    }
+    ScatterRecord srec;
+    Color emitted = hrec.mat_ptr->emitted(r, hrec, hrec.u, hrec.v, hrec.p);
+
+    if (!hrec.mat_ptr->scatter(r, hrec, srec)) {
+        return emitted;
+    }
+    else if (srec.is_specular) {
+        return Color();
+    }
+    else {
+        PDF* pdf = new HittableCustomPDF(lights, hrec.p);
+        srec.scattered = Ray(hrec.p, pdf->generate());
+        double pdf_val = pdf->value(srec.scattered.direction());
+
+        delete pdf; // release memory
+
+        return emitted + srec.albedo * direct_lighting_radiance(srec.scattered, background, world, lights, depth - 1)
+            * hrec.mat_ptr->scattering_pdf(r, hrec, srec.scattered) / pdf_val;
     }
 }
 
 Color direct_lighting_radiance(const Ray& r, const Color& background, const Hittable& world, Hittable* lights) {
-    return path_tracing_radiance(r, background, world, lights, 1, 1);
+    return direct_lighting_radiance(r, background, world, lights, 1);
 }
 
-Color photon_radiance(const Ray& r, const Color& background, const Hittable& world, Hittable* lights,
-    double imp_ratio, int depth, PhotonMap* global_map) {
+Color global_photon_radiance(const Ray& r, const Color& background, const Hittable& world, int depth, PhotonMap* global_map) { // used for global photon map
     if (depth <= 0) {
-        return Vec3();
+        return Color();
     }
     HitRecord hrec;
     if (!world.hit(r, 1e-4, infinity, hrec)) { // if not hit
-        return Color();
+        return background;
     }
     ScatterRecord srec;
     Color emitted = hrec.mat_ptr->emitted(r, hrec, hrec.u, hrec.v, hrec.p);
@@ -72,7 +107,7 @@ Color photon_radiance(const Ray& r, const Color& background, const Hittable& wor
         return emitted;
     }
     else if (srec.is_specular) {
-        return emitted + srec.albedo * photon_radiance(srec.scattered, background, world, lights, imp_ratio, depth - 1, global_map);
+        return emitted + srec.albedo * global_photon_radiance(srec.scattered, background, world, depth - 1, global_map);
     }
     else {
         Vec3 ellipsoid_param = Vec3(400, 400, 400);
@@ -80,9 +115,94 @@ Color photon_radiance(const Ray& r, const Color& background, const Hittable& wor
     }
 }
 
+Color indirect_radiance(const Ray& r, const Color& background, const Hittable& world, PhotonMap* map) {
+    HitRecord hrec;
+    if (!world.hit(r, 1e-4, infinity, hrec)) { // if not hit
+        return background;
+    }
+    ScatterRecord srec;
+    if (!hrec.mat_ptr->scatter(r, hrec, srec)) {
+        return Color();
+    }
+    else if (srec.is_specular) {
+        return Color();
+    }
+    else {
+        Vec3 ellipsoid_param = Vec3(400, 400, 400);
+        return map->radiance_estimate(hrec.p, srec.albedo / PI, ellipsoid_param, hrec.normal);
+    }
+}
+
+Color hybrid_complete_radiance(const Ray& r, const Color& background, const Hittable& world, Hittable* lights,
+    PhotonMap* caustics_map, PhotonMap* indirect_map, int depth) {
+    if (depth < 0) {
+        return Color();
+    }
+    HitRecord hrec;
+    if (!world.hit(r, 1e-4, infinity, hrec)) { // if not hit
+        return background;
+    }
+    ScatterRecord srec;
+    Color emitted = hrec.mat_ptr->emitted(r, hrec, hrec.u, hrec.v, hrec.p);
+
+    if (!hrec.mat_ptr->scatter(r, hrec, srec)) {
+        return emitted;
+    }
+    else if (srec.is_specular) {
+        return emitted + srec.albedo * hybrid_complete_radiance(srec.scattered, background, world, lights, caustics_map, indirect_map, depth - 1);
+    }
+    else {
+        // return direct_lighting_radiance + indirect_radiance + caustics_radiance
+        Color direct;
+        Color indirect;
+        Color caustics;
+        Vec3 ellipsoid_param = Vec3(400, 400, 400);
+        PDF* pdf = new HittableCustomPDF(lights, hrec.p);
+        srec.scattered = Ray(hrec.p, pdf->generate());
+        double pdf_val = pdf->value(srec.scattered.direction());
+        direct = emitted + srec.albedo * direct_lighting_radiance(srec.scattered, background, world, lights, 0)
+            * hrec.mat_ptr->scattering_pdf(r, hrec, srec.scattered) / pdf_val;
+        indirect = indirect_map->radiance_estimate(hrec.p, srec.albedo / PI, ellipsoid_param, hrec.normal);
+        caustics = caustics_map->radiance_estimate(hrec.p, srec.albedo / PI, ellipsoid_param, hrec.normal);
+
+        delete pdf; // release memory
+
+        return direct + indirect + caustics;
+    }
+}
+
+Color specular_radiance(const Ray& r, const Color& background, const Hittable& world, Hittable* lights, Hittable* spec_list,
+    PhotonMap* caustics_map, PhotonMap* indirect_map, int depth) {
+    if (depth < 0) {
+        return Color();
+    }
+    HitRecord hrec;
+    if (!spec_list->hit(r, 1e-4, infinity, hrec)) { // if not hit specular objects
+        return background;
+    }
+    ScatterRecord srec;
+
+    if (!hrec.mat_ptr->scatter(r, hrec, srec)) {
+        return Color();
+    }
+    else if (srec.is_specular) {
+        return srec.albedo * hybrid_complete_radiance(srec.scattered, background, world, lights, caustics_map, indirect_map, depth - 1);
+    }
+    else {
+        return Color();
+    }
+}
+
 Color photon_brightness(const Ray& r, const Hittable& world, PhotonMap* map) {
     HitRecord hrec;
     if (!world.hit(r, 1e-4, infinity, hrec)) { // if not hit
+        return Color();
+    }
+    ScatterRecord srec;
+    if (!hrec.mat_ptr->scatter(r, hrec, srec)) {
+        return Color();
+    }
+    else if (srec.is_specular) {
         return Color();
     }
     Vec3 ellipsoid_param = Vec3(0.5, 0.5, 0.5);
@@ -96,7 +216,7 @@ HittableList cornell_box() {
     Material* green = new Diffuse(Color(0.12, 0.45, 0.15));
     Material* light = new DiffuseLight(Color(16, 16, 16));
     Material* white_mirror = new Specular(Color(0.75, 0.75, 0.75));
-    Material* glass = new Dielectric(new SolidColor(1, 1, 1), 1.5);
+    Material* glass = new Dielectric(new SolidColor(1, 1, 1), 1.6);
 
     // add walls
     objects.add(new YZ_Rect(0, 555, 0, 555, 555, red));
@@ -118,33 +238,44 @@ HittableList cornell_box() {
     return objects;
 }
 
-HittableList cornell_box_spheres() {
+HittableList cornell_box_spheres(HittableList* imp_list, HittableList* spec_list, HittableList* light_list) {
     HittableList objects;
     Material* white = new Diffuse(Color(0.75, 0.75, 0.75));
     Material* red = new Diffuse(Color(0.65, 0.05, 0.05));
     Material* green = new Diffuse(Color(0.12, 0.45, 0.15));
     Material* light = new DiffuseLight(Color(20, 20, 20));
     Material* white_mirror = new Specular(Color(0.8, 0.8, 0.8));
-    Material* glass = new Dielectric(new SolidColor(1, 1, 1), 1.5);
+    Material* glass = new Dielectric(new SolidColor(1, 1, 1), 1.6);
+    Hittable* light_o = new XZ_Rect(213, 343, 227, 332, 554, light);
 
     // add walls
     objects.add(new YZ_Rect(0, 555, 0, 555, 555, red));
     objects.add(new YZ_Rect(0, 555, 0, 555, 0, green));
-    objects.add(new XZ_Rect(213, 343, 227, 332, 554, light)); // light
+    objects.add(light_o); // light
     objects.add(new XZ_Rect(0, 555, 0, 555, 0, white)); // floor
     objects.add(new XZ_Rect(0, 555, 0, 555, 555, white)); // ceil
     objects.add(new XY_Rect(0, 555, 0, 555, 555, white)); // front
 
-    Hittable* sph1 = new Sphere(Point3(415, 100, 360), 100, white_mirror);
+    Hittable* sph1 = new Sphere(Point3(415, 100, 360), 100, white_mirror); // mirror sphere
     Hittable* sph2 = new Sphere(Point3(140, 100, 190), 100, glass); // glass sphere
 
     objects.add(sph1);
     objects.add(sph2);
+
+    light_list->add(light_o);
+
+    imp_list->add(light_o);
+    imp_list->add(sph2);
+
+    spec_list->add(sph1);
+    spec_list->add(sph2);
+
     return objects;
 }
 
 HittableList earth() {
-    ImageTexture* earth_texture = new ImageTexture("earthmap.jpg");
+    // ImageTexture* earth_texture = new ImageTexture("earthmap.jpg"); // error in texture.h
+    SolidColor* earth_texture = new SolidColor(Color(1, 1, 1));
     Diffuse* earth_surface = new Diffuse(earth_texture);
     Sphere* globe = new Sphere(Point3(0, 0, 0), 2, earth_surface);
     return HittableList(globe);
@@ -190,6 +321,14 @@ HittableList empty_cornell_box() {
     return objects;
 }
 
+void change_file_name(string& s, RenderingMethod method) {
+    size_t length = s.length();
+    string s1 = s.substr(0, length - 4);
+    string s2 = s.substr(length - 4);
+    string mid = method == RenderingMethod::PATH_TRACING ? "_pt" : "_pm";
+    s = s1 + mid + s2;
+}
+
 int main() {
     // image
     // customizable configuration
@@ -204,11 +343,16 @@ int main() {
     double aspect_ratio = 16.0/9;
     int image_width = 400;
     int param_config = static_cast<std::underlying_type<ParamConfig>::type>(ParamConfig::CUSTOM);
-    int method_config = static_cast<std::underlying_type<RenderingMethodConfig>::type>(RenderingMethodConfig::PATH_TRACING);
+    int method_config_in = static_cast<std::underlying_type<RenderingMethod>::type>(RenderingMethod::PATH_TRACING);
+    RenderingMethod method_config = RenderingMethod::PATH_TRACING;
+    Color global_photon_energy = Color(21, 21, 21);
+    Color caustics_photon_energy = Color(4.5, 4.5, 4.5);
 
     // world
     HittableList world;
-    HittableList* lights = new HittableList();
+    HittableList* imp_list = new HittableList(); // do not delete this, otherwise it will cause redundantly release
+    HittableList* spec_list = new HittableList(); // do not delete this, otherwise it will cause redundantly release
+    HittableList* light_list = new HittableList(); // do not delete this, otherwise it will cause redundantly release
     Color background(0, 0, 0);
 
     // camera
@@ -224,26 +368,29 @@ int main() {
     clock_t end_time;
 
     // get input
-    cout << "please input scene number: "
+    std::cout << "please input scene number: "
         << endl << "1. simple_scene"
         << endl << "2. earth"
         << endl << "3. cornell_box"
         << endl << "4. cornell_box_spheres"
         << endl;
     cin >> scene_case;
-    cout << "please select rendering method\n1.path tracing\n2.photon mapping\n";
-    cin >> method_config;
-    cout << "please select configuration\n1.default\n2.custom\n";
+    std::cout << "please select rendering method\n1.path tracing\n2.photon mapping\n";
+    cin >> method_config_in;
+    std::cout << "please select configuration\n1.default\n2.custom\n";
     cin >> param_config;
     if (param_config == static_cast<std::underlying_type<ParamConfig>::type>(ParamConfig::CUSTOM)) {
-        cout << "please input max reflection depth: ";
+        std::cout << "please input max reflection depth: ";
         cin >> max_depth;
-        cout << "please input samples per pixel: ";
+        std::cout << "please input samples per pixel: ";
         cin >> samples_per_pixel;
-        cout << "please input importance sampling ratio (between[0, 1]) : ";
+        std::cout << "please input importance sampling ratio (between[0, 1]) : ";
         cin >> importance_ratio;
     }
-   
+    method_config = static_cast<RenderingMethod>(method_config_in);
+    max_depth = static_cast<int>(clamp(max_depth, 1, 32));
+    samples_per_pixel = static_cast<int>(clamp(samples_per_pixel, 1, 1000));
+    importance_ratio = clamp(importance_ratio, 0, 1);
     // scene
     switch (scene_case)
     {
@@ -270,19 +417,17 @@ int main() {
         lookfrom = Point3(278, 278, -800);
         lookat = Point3(278, 278, 0);
         vfov = 40.0;
-        lights->add(new XZ_Rect(213, 343, 227, 332, 554, nullptr)); // light
+        imp_list->add(new XZ_Rect(213, 343, 227, 332, 554, nullptr)); // light
         break;
     case 4:
-        filename = "cornell_box_spheres.ppm";
-        world = cornell_box_spheres();
+        filename = "cornell_spheres.ppm";
+        world = cornell_box_spheres(imp_list, spec_list, light_list);
         aspect_ratio = 1.0;
         image_width = 600;
         background = Color();
         lookfrom = Point3(278, 278, -800);
         lookat = Point3(278, 278, 0);
         vfov = 40.0;
-        lights->add(new XZ_Rect(213, 343, 227, 332, 554, nullptr)); // light
-        lights->add(new Sphere(Point3(190, 90, 190), 90, nullptr)); // glass ball
         break;
     default:
     case 0:
@@ -292,17 +437,18 @@ int main() {
         lookfrom = Point3(0, 1, 2);
         lookat = Point3(0, 1, 0);
         vfov = 40.0;
-        lights->add(new XZ_Rect(-1, 1, -1, 1, 3, nullptr));
+        imp_list->add(new XZ_Rect(-1, 1, -1, 1, 3, nullptr));
         break;
     };
     int image_height = static_cast<int>(image_width / aspect_ratio);
 
     // camera
     Camera cam(lookfrom, lookat, vup, vfov, aspect_ratio, aperture, dist_to_focus);
-    HittableList empty_box = empty_cornell_box();
+    HittableList empty_box = empty_cornell_box(); // for rendering photon map
 
     // render
-    if (method_config == static_cast<std::underlying_type<RenderingMethodConfig>::type>(RenderingMethodConfig::PATH_TRACING)) {
+    change_file_name(filename, method_config);
+    if (method_config_in == static_cast<std::underlying_type<RenderingMethod>::type>(RenderingMethod::PATH_TRACING)) {
         ofstream outfile;
         outfile.open(filename);
         outfile << "P3\n" << image_width << ' ' << image_height << "\n255\n";
@@ -317,26 +463,31 @@ int main() {
                     double u = (i + subpixel_u * subpixel_length + random_double() / subpixel_level) / (image_width - 1.0);
                     double v = (j + subpixel_v * subpixel_length + random_double() / subpixel_level) / (image_height - 1.0);
                     Ray r = cam.get_ray(u, v);
-                    pixel_color += path_tracing_radiance(r, background, world, lights, importance_ratio, max_depth);
+                    pixel_color += path_tracing_radiance(r, background, world, light_list, importance_ratio, max_depth); // imp_list ignored
                 }
                 write_color(outfile, pixel_color, samples_per_pixel);
             }
         }
         end_time = clock();
         outfile.close();
-        cout << "rendering time is: " << end_time - start_time << endl;
+        std::cout << "rendering time is: " << end_time - start_time << endl;
     }
-    else if (method_config == static_cast<std::underlying_type<RenderingMethodConfig>::type>(RenderingMethodConfig::PHOTON_MAPPING)) {
+    else if (method_config_in == static_cast<std::underlying_type<RenderingMethod>::type>(RenderingMethod::PHOTON_MAPPING)) {
         XZ_Rect* photon_map_light = new XZ_Rect(213, 343, 227, 332, 554, nullptr);
-        PhotonMap* map = new PhotonMap(200000, world, photon_map_light);
-        std::cout << "Photon map constructed\n";
-        samples_per_pixel = 4; //+
+        /*PhotonRatioSampler sampler = PhotonRatioSampler(100000, world, photon_map_light);
+        double photon_ratio = sampler.get_ratio();*/
+        // PhotonMap* map = new PhotonMap(20000, world, photon_map_light);
+        IndirectPhotonMap* indirect_map = new IndirectPhotonMap(40000, 20.0, global_photon_energy, world, photon_map_light);
+        CausticsPhotonMap* caustics_map = new CausticsPhotonMap(20000, 20.0, caustics_photon_energy , world, photon_map_light, spec_list);
+        samples_per_pixel = 1; //+
 
         // render
         ofstream outfile;
-        outfile.open(filename);
-        outfile << "P3\n" << image_width << ' ' << image_height << "\n255\n";
+
+        /*samples_per_pixel = 16;
+        outfile.open("total_scene.ppm");
         start_time = clock();
+        outfile << "P3\n" << image_width << ' ' << image_height << "\n255\n";
         for (int j = image_height - 1; j >= 0; --j) {
             std::cerr << "\rScanlines remaining: " << j << ' ' << std::flush;
             for (int i = 0; i < image_width; ++i) {
@@ -347,18 +498,117 @@ int main() {
                     double u = (i + subpixel_u * subpixel_length + random_double() / subpixel_level) / (image_width - 1.0);
                     double v = (j + subpixel_v * subpixel_length + random_double() / subpixel_level) / (image_height - 1.0);
                     Ray r = cam.get_ray(u, v);
-                    pixel_color += photon_radiance(r, background, world, lights, importance_ratio, max_depth, map);
+                    pixel_color += hybrid_complete_radiance(r, background, world, light_list, caustics_map, indirect_map, max_depth);
                 }
                 write_color(outfile, pixel_color, samples_per_pixel);
             }
         }
         end_time = clock();
         outfile.close();
-        cout << "\nrendering time is: " << end_time - start_time << endl;
+        std::cout << "\nrendering time is: " << end_time - start_time << endl;*/
+
+        // direct lighting
+        /*samples_per_pixel = 64;
+        outfile.open("direct_lighting.ppm");
+        start_time = clock();
+        outfile << "P3\n" << image_width << ' ' << image_height << "\n255\n";
+        for (int j = image_height - 1; j >= 0; --j) {
+            std::cerr << "\rScanlines remaining: " << j << ' ' << std::flush;
+            for (int i = 0; i < image_width; ++i) {
+                Color pixel_color(0, 0, 0);
+                for (int s = 0; s < samples_per_pixel; ++s) { // stratified sampling
+                    int subpixel_u = s % subpixel_level; // column
+                    int subpixel_v = (s % subpixel_level2) / subpixel_level; // row
+                    double u = (i + subpixel_u * subpixel_length + random_double() / subpixel_level) / (image_width - 1.0);
+                    double v = (j + subpixel_v * subpixel_length + random_double() / subpixel_level) / (image_height - 1.0);
+                    Ray r = cam.get_ray(u, v);
+                    pixel_color += direct_lighting_radiance(r, background, world, light_list, 1);
+                }
+                write_color(outfile, pixel_color, samples_per_pixel);
+            }
+        }
+        end_time = clock();
+        outfile.close();
+        std::cout << "\nrendering time is: " << end_time - start_time << endl;*/
+
+        // caustics
+        samples_per_pixel = 4;
+        outfile.open("caustics.ppm");
+        start_time = clock();
+        outfile << "P3\n" << image_width << ' ' << image_height << "\n255\n";
+        for (int j = image_height - 1; j >= 0; --j) {
+            std::cerr << "\rScanlines remaining: " << j << ' ' << std::flush;
+            for (int i = 0; i < image_width; ++i) {
+                Color pixel_color(0, 0, 0);
+                for (int s = 0; s < samples_per_pixel; ++s) { // stratified sampling
+                    int subpixel_u = s % subpixel_level; // column
+                    int subpixel_v = (s % subpixel_level2) / subpixel_level; // row
+                    double u = (i + subpixel_u * subpixel_length + random_double() / subpixel_level) / (image_width - 1.0);
+                    double v = (j + subpixel_v * subpixel_length + random_double() / subpixel_level) / (image_height - 1.0);
+                    Ray r = cam.get_ray(u, v);
+                    pixel_color += indirect_radiance(r, background, world, caustics_map);
+                }
+                write_color(outfile, pixel_color, samples_per_pixel);
+            }
+        }
+        end_time = clock();
+        outfile.close();
+        std::cout << "\nrendering time is: " << end_time - start_time << endl;
+
+        // indirect lighting
+        samples_per_pixel = 4;
+        outfile.open("indirect_lighting.ppm");
+        start_time = clock();
+        outfile << "P3\n" << image_width << ' ' << image_height << "\n255\n";
+        for (int j = image_height - 1; j >= 0; --j) {
+            std::cerr << "\rScanlines remaining: " << j << ' ' << std::flush;
+            for (int i = 0; i < image_width; ++i) {
+                Color pixel_color(0, 0, 0);
+                for (int s = 0; s < samples_per_pixel; ++s) { // stratified sampling
+                    int subpixel_u = s % subpixel_level; // column
+                    int subpixel_v = (s % subpixel_level2) / subpixel_level; // row
+                    double u = (i + subpixel_u * subpixel_length + random_double() / subpixel_level) / (image_width - 1.0);
+                    double v = (j + subpixel_v * subpixel_length + random_double() / subpixel_level) / (image_height - 1.0);
+                    Ray r = cam.get_ray(u, v);
+                    pixel_color += indirect_radiance(r, background, world, indirect_map);
+                }
+                write_color(outfile, pixel_color, samples_per_pixel);
+            }
+        }
+        end_time = clock();
+        outfile.close();
+        std::cout << "\nrendering time is: " << end_time - start_time << endl;
+
+        // specular
+        /*samples_per_pixel = 32;
+        outfile.open("specular.ppm");
+        start_time = clock();
+        outfile << "P3\n" << image_width << ' ' << image_height << "\n255\n";
+        for (int j = image_height - 1; j >= 0; --j) {
+        // for (int j = 150; j >= 0; --j) {
+            //- std::cerr << "\rScanlines remaining: " << j << ' ' << std::flush;
+            for (int i = 0; i < image_width; ++i) {
+                std::cerr << "\rScanlines remaining: " << j << ' ' << i << ' ' << std::flush; //+
+                Color pixel_color(0, 0, 0);
+                for (int s = 0; s < samples_per_pixel; ++s) { // stratified sampling
+                    int subpixel_u = s % subpixel_level; // column
+                    int subpixel_v = (s % subpixel_level2) / subpixel_level; // row
+                    double u = (i + subpixel_u * subpixel_length + random_double() / subpixel_level) / (image_width - 1.0);
+                    double v = (j + subpixel_v * subpixel_length + random_double() / subpixel_level) / (image_height - 1.0);
+                    Ray r = cam.get_ray(u, v);
+                    pixel_color += specular_radiance(r, background, world, light_list, spec_list, caustics_map, indirect_map, max_depth);
+                }
+                write_color(outfile, pixel_color, samples_per_pixel);
+            }
+        }
+        end_time = clock();
+        outfile.close();
+        std::cout << "\nrendering time is: " << end_time - start_time << endl;*/
 
         // render photon map
-        outfile.open("photon_map.ppm");
+        /*outfile.open("photon_map.ppm");
         image_width = image_height = 1200;
+        start_time = clock();
         outfile << "P3\n" << image_width << ' ' << image_height << "\n255\n";
         for (int j = image_height - 1; j >= 0; --j) {
             std::cerr << "\rScanlines remaining: " << j << ' ' << std::flush;
@@ -368,12 +618,14 @@ int main() {
                     double u = (i + 0.5) / (image_width - 1.0);
                     double v = (j + 0.5) / (image_height - 1.0);
                     Ray r = cam.get_ray(u, v);
-                    pixel_color += photon_brightness(r, world, map);
+                    pixel_color += photon_brightness(r, empty_box, indirect_map);
                 }
                 write_color(outfile, pixel_color, 1);
             }
         }
+        end_time = clock();
         outfile.close();
-        // cout << "max photons is: " << map->maxphotons << endl; // debug code
+        std::cout << "\nrendering time is: " << end_time - start_time << endl;
+        std::cout << "max photons is: " << indirect_map->maxphotons << endl; // debug code*/
     }
 }

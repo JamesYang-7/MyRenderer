@@ -16,20 +16,20 @@ using std::sqrt;
 
 // Constants
 
-const double infinity = std::numeric_limits<double>::infinity();
-const double PI = 3.141592653589793;
-extern const double sin_table[360];
-extern const double cos_table[360];
+extern const double infinity;
+extern const double PI;
+// extern const double sin_table[360];
+// extern const double cos_table[360];
 
 // Utility Functions
 
-inline double sintb(double x) {
+/*inline double sintb(double x) {
 	return sin_table[static_cast<int>(x * 180.0 / PI)];
 }
 
 inline double costb(double x) {
 	return cos_table[static_cast<int>(x * 180.0 / PI)];
-}
+}*/
 
 inline double degrees_to_radians(double degrees) {
     return degrees * PI / 180.0;

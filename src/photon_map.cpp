@@ -1,6 +1,5 @@
-#include "photon_map.h"
-
 // PhotonSort
+#include "photon_map.h"
 
 void PhotonSort::sort(photon* a, int lo, int hi, short flag) {
 	if (hi <= lo) return;
@@ -20,62 +19,65 @@ void PhotonSort::sort(photon* a, int lo, int hi, short flag) {
 // PhotonMap
 
 const int PhotonMap::MAX_DEPTH = 16;
-const int PhotonMap::density_photons = 40;
+const int PhotonMap::density_photons = 100;
 
-PhotonMap::PhotonMap(int photon_num_, const Hittable& world, XZ_Rect* light) : photon_num(photon_num_) {
-	photon_array = new photon[photon_num + 1];
+PhotonMap::PhotonMap(int ray_num_, double search_radius_, Color init_energy_, const Hittable& world, XZ_Rect* light)
+	:photon_num(0), ray_num(ray_num_), idx(1), max_search_radius(search_radius_), photon_array(nullptr), initial_energy(init_energy_)
+{
+	max_array_length = ray_num * MAX_DEPTH + 1;
+	photon_array = new photon[max_array_length];
 	generate_global_photons(world, light);
-	std::cout << "constructing photon map...\n";
+	std::cout << "Constructing photon map...\n";
 	root = balance(1, photon_num);
+	std::cout << "Global photon map constructed\n";
 }
 
 void PhotonMap::generate_global_photons(const Hittable& world, XZ_Rect* light) {
-	int idx = 1;
-	while (idx <= photon_num) {
-		std::cerr << "\rPhotons remaining: " << photon_num - idx << ' ' << std::flush;
-		photon_array[idx] = generate_one_global_photon(world, light);
-		++idx;
+	int ray_cnt = 1;
+	while (has_space() && ray_cnt <= ray_num) {
+		std::cerr << "\rPhotons remaining: " << ray_num - ray_cnt << ' ' << std::flush;
+		photon_num += generate_one_global_photon(world, light);
+		++ray_cnt;
 	}
-	std::cout << "\nSuccessfully generated photons \n";
+	std::cout << "\nSuccessfully generated " << photon_num << " photons\n \n";
 }
 
-photon PhotonMap::generate_one_global_photon(const Hittable& world, XZ_Rect* light) {
-	photon pht;
+int PhotonMap::generate_one_global_photon(const Hittable& world, XZ_Rect* light) {
 	HitRecord hrec;
 	ScatterRecord srec;
-	Ray ray = light->generate_emitted_ray();
+	Ray ray;
 	int depth = MAX_DEPTH;
+	int photon_cnt = 0;
+	Color energy = initial_energy; // initialize energy
+
 	do {
-		if (!world.hit(ray, 1e-4, infinity, hrec)) { // re-emit if didn't hit anything
-			ray = light->generate_emitted_ray();
-			depth = MAX_DEPTH;
-			continue;
-		}
-		if (!hrec.mat_ptr->scatter(ray, hrec, srec)) { // re-emit if hits light
-			ray = light->generate_emitted_ray();
-			depth = MAX_DEPTH;
-			continue;
+		ray = light->generate_emitted_ray(); // emit a photon
+	} while (!world.hit(ray, 1e-4, infinity, hrec)); // re-emit if didn't hit anything
+
+	while (depth > 0 && world.hit(ray, 1e-4, infinity, hrec)) {
+		if (!hrec.mat_ptr->scatter(ray, hrec, srec)) { // absorbed if hits light
+			break;
 		}
 		if (srec.is_specular) { // scatter if hits specular surface
 			ray = srec.scattered;
-			pht.color = pht.color * srec.albedo; // modify energy
+			energy = energy * srec.albedo; // modify energy
 			--depth;
 		}
 		else { // if hits diffuse surface
-			if (depth == 0 || random_double() < 0.5) { // using reflectance = 0.5 (may need to be modified)
-				// store photon
-				pht.p = hrec.p;
-				pht.dir = ray.direction();
+			// store photon
+			if (has_space()) {
+				photon_array[idx++] = photon(hrec.p, ray.direction(), energy);
+				++photon_cnt;
+			}
+			else {
 				break;
 			}
-			else { // scatter
-				ray = srec.scattered;
-				pht.color = srec.albedo * pht.color; // modify energy
-				--depth;
-			}
+			ray = srec.scattered;
+			energy = srec.albedo * energy; // modify energy
+			--depth;
 		}
-	} while (depth > 0);
-	return pht;
+	}
+	return photon_cnt;
 }
 
 kd_node* PhotonMap::balance(int lo, int hi) {
@@ -148,7 +150,7 @@ int PhotonMap::locate_photons(Point3 x, Vec3& elps,
 	return locate_photons(root, x, elps, que, normal);
 }
 
-Color PhotonMap::radiance_estimate(Point3 p, Color BRDF, Vec3& elps, Vec3 normal) { // need to be const
+Color PhotonMap::radiance_estimate(Point3 p, Color BRDF, Vec3& elps, Vec3 normal) const { // need to be const
 	std::priority_queue<photon*, std::vector<photon*>, photon_ptr_compare> que;
 	locate_photons(root, p, elps, que, normal);
 	Color radiance = Color();
@@ -159,23 +161,24 @@ Color PhotonMap::radiance_estimate(Point3 p, Color BRDF, Vec3& elps, Vec3 normal
 	// maxphotons = std::max(maxphotons, que.size()); // debug code
 	double r = std::sqrt(que.top()->dist2);
 	if (que.size() < density_photons) {
-		r = 20.0;
+		r = max_search_radius;
 	}
 	while (!que.empty()) {
 		p_pht = que.top();
 		radiance += p_pht->color * (dot(p_pht->dir, normal) > 0 ? 0 : BRDF); // ignore radiance from the back of the surface
 		que.pop();
 	}
-	radiance = radiance / (0.5 * PI * r * r);
+	radiance = radiance / (PI * r * r);
 	return radiance;
 }
 
-Color PhotonMap::show_photon(Point3 p, Vec3& elps, Vec3 normal) const {
+Color PhotonMap::show_photon(Point3 p, Vec3& elps, Vec3 normal) {
 	std::priority_queue<photon*, std::vector<photon*>, photon_ptr_compare> que;
 	locate_photons(root, p, elps, que, normal);
 	Color radiance = Color();
 	Color white = Color(1, 1, 1);
-	double ratio = photon_num / 1e6;
+	double ratio = 5000 / static_cast<double>(ray_num); // careful of 2 integers, the result is 0 without explicit cast
+	maxphotons = std::max(maxphotons, que.size());
 	if (que.empty()) {
 		return Color();
 	}
@@ -190,66 +193,194 @@ Color PhotonMap::show_photon(Point3 p, Vec3& elps, Vec3 normal) const {
 
 // CausticsPhotonMap
 
-CausticsPhotonMap::CausticsPhotonMap(int photon_num_, const Hittable& world, XZ_Rect* light, const Hittable* specular_objects)
-	: PhotonMap() {
-	photon_num = photon_num_;
-	photon_array = new photon[photon_num + 1];
-	generate_caustics_photons(world, light, specular_objects);
-	std::cout << "constructing photon map...\n";
-	root = balance(1, photon_num);
-}
-
-void CausticsPhotonMap::generate_caustics_photons(const Hittable& world, XZ_Rect* light, const Hittable* specular_objects)
+CausticsPhotonMap::CausticsPhotonMap(int ray_num_, double search_radius_, Color init_energy_, const Hittable& world, XZ_Rect* light, const Hittable* specular_objects)
+	: PhotonMap(ray_num_, search_radius_, init_energy_)
 {
-	int idx = 1;
-	while (idx <= photon_num) {
-		std::cerr << "\rCaustics photons remaining: " << photon_num - idx << ' ' << std::flush;
-		photon_array[idx] = generate_one_caustics_photon(world, light, specular_objects);
-		++idx;
-	}
-	std::cout << "\nSuccessfully generated caustics photons \n";
+	max_array_length = ray_num + 1;
+	photon_array = new photon[max_array_length];
+	generate_caustics_photons(world, light, specular_objects);
+	std::cout << "Constructing caustics photon map...\n";
+	root = balance(1, photon_num); // in caustics map, photon_num <= ray_num if nothing is wrong
+	std::cout << "Caustics photon map constructed\n";
 }
 
-photon CausticsPhotonMap::generate_one_caustics_photon(const Hittable& world, const XZ_Rect* light, const Hittable* specular_objects) {
-	photon pht;
+Color CausticsPhotonMap::radiance_estimate(Point3 p, Color BRDF, Vec3& elps, Vec3 normal) const {
+	std::priority_queue<photon*, std::vector<photon*>, photon_ptr_compare> que;
+	locate_photons(root, p, elps, que, normal);
+	Color radiance = Color();
+	photon* p_pht;
+	if (que.empty()) {
+		return Color();
+	}
+	// maxphotons = std::max(maxphotons, que.size()); // debug code
+	double r = std::sqrt(que.top()->dist2);
+	if (que.size() < density_photons) {
+		r = max_search_radius;
+	}
+	while (!que.empty()) {
+		p_pht = que.top();
+		radiance += p_pht->color * (dot(p_pht->dir, normal) > 0 ? 0 : BRDF) * 3 * (1 - (p_pht->p - p).length() / r); // ignore radiance from the back of the surface
+		// radiance += p_pht->color * (dot(p_pht->dir, normal) > 0 ? 0 : BRDF);
+		que.pop();
+	}
+	radiance = radiance / (PI * r * r);
+	return radiance;
+}
+
+void CausticsPhotonMap::generate_caustics_photons(const Hittable& world, XZ_Rect* light, const Hittable* specular_objects) {
+	int ray_cnt = 1;
+	int generated_num = 0;
+	while (has_space() && ray_cnt <= ray_num) {
+		std::cerr << "\rCaustics photons remaining: " << ray_num - ray_cnt << ' ' << std::flush;
+		generated_num = generate_one_caustics_photon(world, light, specular_objects);
+		if (generated_num > 0) {
+			photon_num += generated_num;
+			++ray_cnt;
+		}
+	}
+	std::cout << "\nSuccessfully generated " << photon_num << " caustics photons\n \n";
+}
+
+int CausticsPhotonMap::generate_one_caustics_photon(const Hittable& world, const XZ_Rect* light, const Hittable* specular_objects) {
 	HitRecord hrec;
 	ScatterRecord srec;
 	Point3 random_p = light->random_point();
 	Ray ray = Ray(random_p, specular_objects->generate_random(random_p));
 	int depth = MAX_DEPTH;
+	int photon_cnt = 0;
+	Color energy = initial_energy;
 	bool hits_specular_first = false;
+
 	do {
 		if (!world.hit(ray, 1e-4, infinity, hrec)) { // re-emit if didn't hit anything
-			random_p = light->random_point();
-			ray = Ray(random_p, specular_objects->generate_random(random_p));
-			depth = MAX_DEPTH;
-			continue;
+			break;
 		}
 		if (!hrec.mat_ptr->scatter(ray, hrec, srec)) { // re-emit if hits light
-			random_p = light->random_point();
-			ray = Ray(random_p, specular_objects->generate_random(random_p));
-			depth = MAX_DEPTH;
-			continue;
+			break;
 		}
 		if (srec.is_specular) { // scatter if hits specular surface
 			ray = srec.scattered;
-			pht.color = pht.color * srec.albedo;
+			energy = energy * srec.albedo;
 			if (!hits_specular_first) { hits_specular_first = true; }
 			--depth;
 		}
 		else { // if hits diffuse surface
-			if (hits_specular_first) { // if hits specular first, store photon
-				pht.p = hrec.p;
-				pht.dir = ray.direction();
+			if (hits_specular_first && has_space()) { // if hits specular first
+				photon_array[idx++] = photon(hrec.p, ray.direction(), energy); // store photon
+				++photon_cnt;
 				break;
 			}
 			else { // re-emit
-				random_p = light->random_point();
-				ray = Ray(random_p, specular_objects->generate_random(random_p));
-				depth = MAX_DEPTH;
-				continue;
+				break;
 			}
 		}
 	} while (depth > 0);
-	return pht;
+	return photon_cnt;
+}
+
+// Indirect Photon Map
+
+IndirectPhotonMap::IndirectPhotonMap(int ray_num_, double search_radius_, Color init_energy_, const Hittable& world, XZ_Rect* light)
+	:PhotonMap(ray_num_, search_radius_, init_energy_)
+{
+	max_array_length = ray_num * MAX_DEPTH + 1;
+	photon_array = new photon[max_array_length];
+	generate_indirect_photons(world, light);
+	std::cout << "Constructing indirect photon map...\n";
+	root = balance(1, photon_num);
+	std::cout << "Indirect photon map constructed\n \n";
+}
+
+void IndirectPhotonMap::generate_indirect_photons(const Hittable& world, XZ_Rect* light)
+{
+	int ray_cnt = 1;
+	int generated_num;
+	while (has_space() && ray_cnt <= ray_num) {
+		std::cerr << "\rIndirect photons remaining: " << ray_num - ray_cnt << ' ' << std::flush;
+		generated_num = generate_one_indirect_photon(world, light);
+		if (generated_num > 0) {
+			photon_num += generated_num;
+			++ray_cnt;
+		}
+	}
+	std::cout << "\nSuccessfully generated " << photon_num << " indirect photons\n";
+}
+
+int IndirectPhotonMap::generate_one_indirect_photon(const Hittable& world, XZ_Rect* light)
+{
+	HitRecord hrec;
+	ScatterRecord srec;
+	Ray ray = light->generate_emitted_ray();
+	int depth = MAX_DEPTH;
+	int photon_cnt = 0;
+	Color energy = initial_energy;
+	bool hits_diffuse_first = false;
+
+	do {
+		ray = light->generate_emitted_ray(); // emit a photon
+	} while (!world.hit(ray, 1e-4, infinity, hrec)); // re-emit if didn't hit anything
+
+	while (depth > 0 && world.hit(ray, 1e-4, infinity, hrec)) {
+		if (!hrec.mat_ptr->scatter(ray, hrec, srec)) { // absorbed if hits light
+			break;
+		}
+		if (srec.is_specular) { // scatter if hits specular surface
+			if (depth == MAX_DEPTH) { return 0; } // re-emit if first hits specular surface, this part should be contained in caustics map
+			ray = srec.scattered;
+			energy = energy * srec.albedo; // modify energy
+			--depth;
+		}
+		else { // if hits diffuse surface
+			if (hits_diffuse_first && has_space()) {
+				photon_array[idx++] = photon(hrec.p, ray.direction(), energy); // store photon
+				++photon_cnt;
+			}
+			else {
+				hits_diffuse_first = true;
+			}
+			ray = srec.scattered;
+			energy = srec.albedo * energy; // modify energy
+			--depth;
+		}
+	}
+	return photon_cnt;
+}
+
+PhotonRatioSampler::PhotonRatioSampler(int ray_num_, const Hittable& world, XZ_Rect* light)
+	: ray_num(ray_num_), spec_num(0), non_spec_num(0), ratio(0)
+{
+	int ray_cnt = 1;
+	int generated_num = 0;
+	while (ray_cnt <= ray_num) {
+		std::cerr << "\rTest photons remaining: " << ray_num - ray_cnt << ' ' << std::flush;
+		generated_num = generate_one_global_photon(world, light);
+		if (generated_num > 0) {
+			++ray_cnt;
+		}
+	}
+	ratio = static_cast<double>(non_spec_num) / spec_num; // compute ratio
+	std::cout << "\nRatio of non-specular photons to specular photons is: " << ratio << "\n \n";
+}
+
+int PhotonRatioSampler::generate_one_global_photon(const Hittable& world, XZ_Rect* light)
+{
+	HitRecord hrec;
+	ScatterRecord srec;
+	Ray ray;
+	
+	ray = light->generate_emitted_ray();
+
+	if (!world.hit(ray, 1e-4, infinity, hrec)) { // if didn't hit
+		return 0;
+	}
+	if (!hrec.mat_ptr->scatter(ray, hrec, srec)) { // absorbed if hits light
+		return 0;
+	}
+	if (srec.is_specular) { // scatter if hits specular surface
+		++spec_num;
+	}
+	else { // if hits diffuse surface
+		++non_spec_num;
+	}
+	return 1;
 }

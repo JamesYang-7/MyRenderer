@@ -8,31 +8,16 @@
 class PDF {
 public:
     virtual ~PDF() {}
-
     virtual double value(const Vec3& direction) const = 0;
     virtual Vec3 generate() const = 0;
 };
 
-Vec3 random_cosine_direction() {
-    double phi = 2 * PI * random_double();
-    double r2 = random_double();
-    double z = sqrt(1 - r2); // z = cos(arcsin(x))
-    double x = cos(phi) * sqrt(r2);
-    double y = sin(phi) * sqrt(r2);
-    return Vec3(x, y, z);
-}
-
-Vec3 random_to_sphere(double radius, double distance_squared) {
-    double phi = 2 * PI * random_double();
-    double r2 = random_double();
-    double z = 1 + r2 * (sqrt(1 - radius * radius / distance_squared) - 1);
-    double x = cos(phi) * sqrt(1 - z * z);
-    double y = sin(phi) * sqrt(1 - z * z);
-    return Vec3(x, y, z);
-}
+Vec3 random_cosine_direction();
+Vec3 random_to_sphere(double radius, double distance_squared);
 
 class CosinePDF : public PDF {
 public:
+    ~CosinePDF() {}
     CosinePDF(const Vec3& w) { uvw.build_from_w(w); }
 
     virtual double value(const Vec3& direction) const override {
@@ -50,6 +35,7 @@ public:
 
 class HittableCustomPDF : public PDF {
 public:
+    ~HittableCustomPDF() {}
     HittableCustomPDF(Hittable* ptr_, const Point3& origin) : ptr(ptr_), o(origin) {}
     virtual double value(const Vec3& direction) const override {
         return ptr->pdf_value(o, direction);
@@ -64,10 +50,7 @@ public:
 
 class MixturePDF : public PDF {
 public:
-    ~MixturePDF() {
-        delete p[0];
-        delete p[1];
-    }
+    ~MixturePDF() {} // be aware of memory leak, must delete p[i] somewhere else
 
     MixturePDF(PDF* pdf_important, PDF* pdf_normal, double imp_ratio) : importance_ratio(imp_ratio) {
         if (importance_ratio < 0 || importance_ratio > 1) importance_ratio = 0;
